@@ -153,7 +153,7 @@ index e1359db55..31053e619 100644
 +
 +config MIN_BASE_SLICE_NS
 +	int "Default value for min_base_slice_ns"
-+	default 2000000
++	default 3000000
 +	help
 +	 The BORE Scheduler automatically calculates the optimal base
 +	 slice for the configured HZ using the following equation:
@@ -250,10 +250,10 @@ index 000000000..7c1baa1bd
 +#ifdef CONFIG_SCHED_BORE
 +u8   __read_mostly sched_bore                   = 1;
 +u8   __read_mostly sched_burst_inherit_type     = 2;
-+u8   __read_mostly sched_burst_smoothness       = 1;
-+u8   __read_mostly sched_burst_penalty_offset   = 24;
-+uint __read_mostly sched_burst_penalty_scale    = 1536;
-+uint __read_mostly sched_burst_cache_lifetime   = 75000000;
++u8   __read_mostly sched_burst_smoothness       = 2;
++u8   __read_mostly sched_burst_penalty_offset   = 22;
++uint __read_mostly sched_burst_penalty_scale    = 1280;
++uint __read_mostly sched_burst_cache_lifetime   = 60000000;
 +static int __maybe_unused maxval_prio    =   39;
 +static int __maybe_unused maxval_6_bits  =   63;
 +static int __maybe_unused maxval_8_bits  =  255;
