@@ -1,104 +1,157 @@
 # linux-float
 
-A kernel variant built for **fluidity on modest hardware** — machines with 2 to 4 cores and 4 to 8 GB of RAM. Derived from [linux-psycachy](https://git.linux.toys/psygreg/linux-psycachy) and the CachyOS patchset, with a different set of priorities.
+Um kernel adaptativo construído para **máxima fluidez sem sacrificar eficiência energética** — detecta automaticamente seu hardware e compila otimizado especificamente para ele.
 
-The goal is not raw throughput. It is **preventing stutters**: the mouse not freezing when a background process spikes, windows not locking up while the system swaps, disk I/O not blocking the UI. Everything below serves that goal.
+Derivado do [linux-psycachy](https://git.linux.toys/psygreg/linux-psycachy) e do patchset CachyOS, com foco em três objetivos simultâneos:
 
----
-
-## What makes it different
-
-### Scheduler — BORE tuned for low core counts
-
-The base patchset ships the [BORE scheduler](https://github.com/firelzrd/bore-scheduler) (Burst-Oriented Response Enhancer), which penalizes CPU-hungry background tasks and gives priority to interactive ones. linux-float ships with values tuned specifically for 2–4 core machines:
-
-| Parameter | Upstream default | linux-float | Why |
-|---|---|---|---|
-| `sched_burst_penalty_offset` | 24 | 22 | Penalizes burst processes sooner — windows and mouse get CPU faster |
-| `sched_burst_penalty_scale` | 1536 | 1280 | Softer penalty slope — prevents starvation on machines with few cores |
-| `sched_burst_cache_lifetime` | 75 ms | 60 ms | Burst history forgotten faster — less residual penalty when switching tasks |
-| `sched_burst_smoothness` | 1 | 2 | Smoother penalty transitions — less jitter on slow CPUs |
-| `MIN_BASE_SLICE_NS` | 2 ms | 3 ms | Larger minimum time slice — fewer context switches per tick |
-
-### Memory — protecting RAM from thrashing
-
-The most impactful change for machines with 4–8 GB. The kernel normally makes aggressive decisions about what to evict from RAM. These settings make it protect what you are actually using:
-
-| Parameter | Default | linux-float | Why |
-|---|---|---|---|
-| `ANON_MIN_RATIO` | 1% | 3% | Protects active process pages from being pushed to swap |
-| `CLEAN_LOW_RATIO` | 15% | 20% | Keeps more file cache in RAM — browser tabs, shared libraries |
-| `CLEAN_MIN_RATIO` | 4% | 6% | Hard floor on file cache — disk I/O does not thrash even under pressure |
-| `ZSWAP` | off, lzo | **on, zstd** | Compressed RAM swap active by default — zstd gives ~30% better ratio than lzo |
-| `THP` | ALWAYS | MADVISE | Disables automatic huge pages — prevents fragmentation waste on small RAM |
-| `ZRAM` | module | built-in | Available at boot without manual `modprobe` |
-
-### Kernel config
-
-| Option | Upstream | linux-float | Why |
-|---|---|---|---|
-| `PREEMPT` | VOLUNTARY | **FULL** | Kernel interrupts any task immediately to serve the user |
-| `HZ` | 1000 | **500** | Half the timer interrupts — real overhead on a 2-core CPU |
-| `NR_CPUS` | 8192 | **16** | Saves ~50 MB of RAM in per-cpu structs that would never be used |
-| `NUMA` | on | **off** | Removes NUMA decision overhead on every allocation — no modest machine has NUMA |
-| `CPU governor` | schedutil | **performance** | No frequency ramp-up latency — CPU always ready |
-| `BFQ I/O scheduler` | module | **built-in** | Active from boot — essential for HDDs and slow SSDs to not block the UI |
+> **Performance máxima · Economia de energia · Tempo de compilação mínimo**
 
 ---
 
-## Patches applied
+## O que diferencia o linux-float
 
-The following patches are applied in order during build:
+### Detecção automática de hardware
 
-| File | Source | What it does |
+O build script identifica sua geração de CPU antes de compilar e aplica o perfil correto:
+
+| Hardware detectado | Perfil | Comportamento |
 |---|---|---|
-| `0001-bore-cachy.patch` | Masahito Suzuki / Piotr Gorski | BORE scheduler — prioritizes interactive tasks over background burst processes |
-| `0002-bbr3.patch` | Peter Jung (CachyOS) | BBR v3 TCP congestion control — better throughput and latency on home networks |
-| `0003-block.patch` | Peter Jung (CachyOS) | BFQ and mq-deadline I/O scheduler improvements |
-| `0004-cachy.patch` | Peter Jung (CachyOS) | CachyOS core: ADIOS I/O scheduler, memory ratio knobs, AMD/Intel GPU improvements, ZRAM, THP, v4l2loopback, vhba |
-| `0005-fixes.patch` | Psygreg | Misc fixes for AMD CPU and Intel PSR |
-| `config.patch` | Psygreg | Copies `.config` into kernel headers build directory for external module compatibility |
+| i3/i5/i7 2ª–3ª gen, Xeon E3/E5 v1-v2, 2–4 núcleos | **modest** | HZ 500, schedutil, anti-thrash agressivo, NR_CPUS=16 |
+| i5/i7 4ª–9ª gen, Xeon E3/E5 v3-v4, Ryzen 1000–3000, 4–8 núcleos | **balanced** | HZ 1000, schedutil, memória equilibrada, NR_CPUS=64 |
+| i7/i9 10ª+ gen, Xeon Scalable, Ryzen 5000+, EPYC, 8+ núcleos | **performance** | HZ 1000, performance governor, THP ativo, NR_CPUS=512 |
 
-> `0010-bore-cachy-fix.patch` is intentionally skipped — its declarations are already present in `0001`.
+Você também pode forçar um perfil manualmente: `./build.sh 6.14.13 --profile balanced`
 
 ---
 
-## Building
+### Compilador — Clang + ThinLTO (padrão)
 
-### Prerequisites
+O script detecta e usa **Clang** automaticamente quando disponível, com fallback para GCC:
 
-Install dependencies (the build script handles this automatically):
+| Compilador | Vantagem |
+|---|---|
+| `clang + ThinLTO` | Build ~20–40% mais rápido · otimização interprocedural · melhor inline |
+| `clang + ccache` | Recompilações até 10× mais rápidas |
+| `gcc` | Fallback seguro quando Clang não está instalado |
+
+Para forçar: `./build.sh 6.14.13 --clang` ou `--gcc`
+
+---
+
+### Scheduler — BORE ajustado por perfil
+
+O patchset inclui o [BORE scheduler](https://github.com/firelzrd/bore-scheduler), que penaliza processos burst e prioriza tarefas interativas. Os parâmetros variam por perfil:
+
+| Parâmetro | Upstream | modest | balanced | performance |
+|---|---|---|---|---|
+| `sched_burst_penalty_offset` | 24 | 22 | 23 | 24 |
+| `sched_burst_penalty_scale` | 1536 | 1280 | 1400 | 1536 |
+| `sched_burst_cache_lifetime` | 75 ms | 60 ms | 70 ms | 75 ms |
+| `sched_burst_smoothness` | 1 | 2 | 1 | 1 |
+| `MIN_BASE_SLICE_NS` | 2 ms | 3 ms | 2 ms | 2 ms |
+
+---
+
+### Memória — proteção contra thrashing por perfil
+
+| Parâmetro | modest (4–8 GB) | balanced (8–16 GB) | performance (16+ GB) |
+|---|---|---|---|
+| `ANON_MIN_RATIO` | 3% | 2% | 1% |
+| `CLEAN_LOW_RATIO` | 20% | 15% | 10% |
+| `CLEAN_MIN_RATIO` | 6% | 5% | 4% |
+| `ZSWAP` | on, zstd | on, zstd | on, zstd |
+| `THP` | MADVISE | MADVISE | ALWAYS |
+| `ZRAM` | built-in | built-in | built-in |
+
+---
+
+### Kernel config — por perfil
+
+| Opção | modest | balanced | performance |
+|---|---|---|---|
+| `PREEMPT` | FULL | FULL | FULL |
+| `HZ` | **500** | 1000 | 1000 |
+| `NR_CPUS` | **16** | 64 | 512 |
+| `NUMA` | off | off | on (se Xeon/HEDT) |
+| `CPU governor` | schedutil | schedutil | **performance** |
+| `I/O scheduler` | BFQ built-in | BFQ built-in | Kyber (NVMe) / BFQ |
+| `LTO` | ThinLTO | ThinLTO | ThinLTO |
+| `DEBUG_INFO` | off | off | off |
+| `FRAME_POINTER` | off | off | off |
+
+---
+
+### Velocidade de compilação
+
+O linux-float foi projetado para compilar **o mais rápido possível**:
+
+- **`--localmodconfig`** por padrão — compila apenas os módulos que seu sistema usa (~15–40 min)
+- **Todos os threads disponíveis** são usados (não `nproc - 1`)
+- **Clang + ThinLTO** reduz tempo de link em 20–40%
+- **ccache** instalado automaticamente — recompilações são até 10× mais rápidas
+- **Debug info desabilitada** — reduz tamanho do binário e tempo de compilação
+- **Drivers não detectados são desabilitados** — menos código para compilar
+
+---
+
+## Patches aplicados
+
+| Arquivo | Fonte | O que faz |
+|---|---|---|
+| `0001-bore-cachy.patch` | Masahito Suzuki / Piotr Gorski | BORE scheduler — prioriza tarefas interativas |
+| `0002-bbr3.patch` | Peter Jung (CachyOS) | TCP BBR v3 — melhor throughput e latência |
+| `0003-block.patch` | Peter Jung (CachyOS) | Melhorias no BFQ e mq-deadline |
+| `0004-cachy.patch` | Peter Jung (CachyOS) | ADIOS I/O, memory ratio knobs, ZRAM, THP, GPU |
+| `0005-fixes.patch` | Psygreg | Correções AMD CPU e Intel PSR |
+| `config.patch` | Psygreg | Copia `.config` no diretório de headers para módulos externos |
+
+> `0010-bore-cachy-fix.patch` é pulado — as declarações já estão presentes em `0001`.
+
+---
+
+## Compilando
+
+### Pré-requisitos
+
+O script instala as dependências automaticamente. Para referência:
 
 ```
 libncurses-dev gawk flex bison openssl libssl-dev dkms libelf-dev
-libudev-dev libpci-dev libiberty-dev autoconf llvm gcc bc rsync
-kmod cpio zstd libzstd-dev libdw-dev libdwarf-dev elfutils
-python3 wget curl debhelper
+libudev-dev libpci-dev libiberty-dev autoconf bc rsync kmod cpio
+zstd libzstd-dev python3 wget curl debhelper libdw-dev elfutils
+libnuma-dev libcap-dev ccache clang lld llvm gcc
 ```
 
-### Usage
+### Uso
 
 ```bash
-git clone <this repo>
+git clone <este repo>
 cd linux-float
 chmod +x build.sh
 
-# Build a specific version:
+# Versão específica (recomendado):
 ./build.sh 6.14.13
 
-# Let the script resolve the latest patch release automatically:
+# Resolver última patch release automaticamente:
 ./build.sh 6.14
+
+# Com opções:
+./build.sh 6.14.13 --clang --profile balanced
+./build.sh 6.14.13 --gcc --localyesconfig
+./build.sh 6.14.13 --profile performance --full
 ```
 
-The script will:
-1. Normalize the version (strips Debian/Ubuntu suffixes like `6.14.0-37` → `6.14.0`)
-2. Download the tarball from kernel.org (`.tar.xz`, falls back to `.tar.gz`)
-3. Apply patches in order from `src/` then the root directory
-4. Copy `config` and run `make olddefconfig`
-5. Compile with `gcc` using `nproc - 1` threads
-6. Output `.deb` packages to `build/`
+O script vai:
+1. Detectar sua CPU e classificar geração/arquitetura
+2. Selecionar Clang ou GCC (com ccache)
+3. Normalizar a versão (ex: `6.14.0-37` → `6.14.0`)
+4. Baixar o tarball de kernel.org
+5. Aplicar patches em ordem de `src/` e depois da raiz
+6. Configurar com o perfil correto para seu hardware
+7. Compilar com todos os threads disponíveis
+8. Gerar `.deb` em `build/`
 
-### Installing
+### Instalando
 
 ```bash
 cd build/
@@ -106,11 +159,11 @@ sudo dpkg -i linux-image-*linuxfloat*.deb linux-headers-*linuxfloat*.deb linux-l
 sudo update-grub
 ```
 
-Reboot and select the `linux-float` kernel in the boot menu.
+Reinicie e selecione o kernel **linux-float** no menu de boot.
 
-### CachyOS system settings (optional but recommended)
+### Configurações userspace CachyOS (opcional, recomendado)
 
-After installing the kernel, apply CachyOS userspace tuning (udev rules, sysctl, tmpfiles, modprobe configs):
+Após instalar o kernel, aplique as otimizações de userspace (udev, sysctl, tmpfiles, modprobe):
 
 ```bash
 chmod +x cachyconfs.sh
@@ -119,24 +172,57 @@ chmod +x cachyconfs.sh
 
 ---
 
-## Repository layout
+## Estrutura do repositório
 
 ```
 .
-├── build.sh              # Build script
-├── cachyconfs.sh         # CachyOS userspace configuration installer
-├── config                # Kernel .config tuned for linux-float
-├── config.patch          # Patch to copy .config into headers build dir
-├── 0001-bore-cachy.patch
-├── 0002-bbr3.patch
-├── 0003-block.patch
-├── 0004-cachy.patch
-├── 0005-fixes.patch
-└── 0010-bore-cachy-fix.patch  (skipped during build — redundant)
+├── build.sh                   # Build script principal
+├── cachyconfs.sh              # Instalador de configurações CachyOS userspace
+├── config                     # Kernel .config base do linux-float
+├── config.patch               # Copia .config no diretório de headers
+├── src/
+│   ├── 0001-bore-cachy.patch
+│   ├── 0002-bbr3.patch
+│   ├── 0003-block.patch
+│   ├── 0004-cachy.patch
+│   ├── 0005-fixes.patch
+│   └── 0010-bore-cachy-fix.patch  (pulado — redundante)
+└── secureboot/
+    ├── create-key.sh          # Assinar kernel para Secure Boot
+    └── mokconfig.cnf
 ```
 
 ---
 
-## License
+## Guia de escolha de perfil
 
-MIT, same as upstream linux-psycachy and CachyOS.
+Não sabe qual perfil escolher? Deixe o script detectar automaticamente, ou use esta tabela:
+
+| Seu hardware | Perfil recomendado |
+|---|---|
+| Notebook antigo, Celeron, Pentium, i3 2ª–4ª gen | `modest` |
+| i5/i7 Sandy Bridge, Ivy Bridge, Xeon E3/E5 v1–v2 | `modest` |
+| i5/i7 Haswell–Coffee Lake (4ª–9ª gen) | `balanced` |
+| Xeon E3/E5 v3–v4, Ryzen 1000–3000 | `balanced` |
+| i7/i9 Ice Lake+ (10ª gen+), Ryzen 5000+ | `performance` |
+| Xeon Scalable, EPYC, Threadripper | `performance` |
+
+---
+
+## Secure Boot
+
+Para assinar o kernel em sistemas com Secure Boot ativo:
+
+```bash
+cd secureboot/
+chmod +x create-key.sh
+./create-key.sh
+```
+
+O script cria um par de chaves MOK, as registra no firmware e assina o kernel instalado.
+
+---
+
+## Licença
+
+MIT, igual ao linux-psycachy e CachyOS upstream.
